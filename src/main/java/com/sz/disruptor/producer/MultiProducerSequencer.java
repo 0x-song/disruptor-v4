@@ -3,11 +3,13 @@ package com.sz.disruptor.producer;
 import com.sz.disruptor.barrier.SequenceBarrier;
 import com.sz.disruptor.sequence.Sequence;
 import com.sz.disruptor.strategy.WaitStrategy;
+import com.sz.disruptor.util.SequenceUtils;
 import com.sz.disruptor.util.UnsafeUtils;
 import sun.misc.Unsafe;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * @Author
@@ -85,12 +87,48 @@ public class MultiProducerSequencer implements ProducerSequencer{
 
     @Override
     public long next(int n) {
+        do {
+            long currentMaxProducerSequenceNumber = currentProducerSequence.get();
 
-        return 0;
+            long nextProducerSequenceNumber = currentMaxProducerSequenceNumber + n;
+
+            //生产者超过消费者一圈的临界点序列
+            long wrapPoint = nextProducerSequenceNumber - this.ringBufferSize;
+
+            long cachedGatingSequence = this.gatingSequenceCache.get();
+
+            if(wrapPoint > cachedGatingSequence){
+                long gatingSequence = SequenceUtils.getMinimumSequence(currentMaxProducerSequenceNumber, this.gatingConsumerSequenceList);
+
+                if(wrapPoint > gatingSequence){
+                    LockSupport.parkNanos(1L);
+
+                    //park短暂阻塞之后continue跳出重新进入循环
+                    continue;
+                }
+
+                //更新一下缓存的序列
+                this.gatingSequenceCache.set(gatingSequence);
+            }else {
+                //生产者没有超过消费者一圈，可以放心生产
+                if(this.currentProducerSequence.compareAndSet(currentMaxProducerSequenceNumber, nextProducerSequenceNumber)){
+                    return nextProducerSequenceNumber;
+                }
+                //cas失败，则重新进入循环中获取最新的消费序列
+            }
+        }while (true);
     }
 
     @Override
     public void publish(long publishIndex) {
+        setAvailable(publishIndex);
+        waitStrategy.signalWhenBlocking();
+    }
+
+    //将特定序列标记为可供消费者使用
+    //消费者会调用isAvailable来进行比对，如果一致，可以消费；如果不一致，不可以消费
+    //还未完全搞清楚原理
+    private void setAvailable(long publishIndex) {
 
     }
 
