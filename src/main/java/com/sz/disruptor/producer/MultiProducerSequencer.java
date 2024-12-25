@@ -8,6 +8,7 @@ import com.sz.disruptor.util.UnsafeUtils;
 import sun.misc.Unsafe;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.locks.LockSupport;
 
@@ -56,7 +57,7 @@ public class MultiProducerSequencer implements ProducerSequencer{
     //scale表示数组中每个元素占用的字节数
     private static final long scale = unsafe.arrayIndexScale(int[].class);
 
-    public MultiProducerSequencer(WaitStrategy waitStrategy, int ringBufferSize) {
+    public MultiProducerSequencer(int ringBufferSize, WaitStrategy waitStrategy) {
         this.waitStrategy = waitStrategy;
         this.ringBufferSize = ringBufferSize;
         this.availableBuffer = new int[ringBufferSize];
@@ -65,6 +66,12 @@ public class MultiProducerSequencer implements ProducerSequencer{
         initAvailableBuffer();
     }
 
+    //availableBuffer内部的值都设置为-1的初始值
+    //availableBuffer中的值标识的是ringBuffer中对应下标位置的事件第几次被覆盖。
+    //举个例子：一个长度为8的ringBuffer，其内部数组下标为2的位置，当序列号为2时其值会被设置为0（第一次被设置值，未被覆盖），
+    // 序列号为10时其值会被设置为1（被覆盖一次），序列号为18时其值会被设置为2（被覆盖两次），以此类推。
+    //序列号对应的下标值通过calculateIndex求模运算获得，
+    // 而被覆盖的次数通过calculateAvailabilityFlag方法对当前发布的序列号做对数计算出来。
     private void initAvailableBuffer() {
         for (int i = availableBuffer.length - 1; i >= 0; i--) {
             this.availableBuffer[i] = -1;
@@ -119,6 +126,7 @@ public class MultiProducerSequencer implements ProducerSequencer{
         }while (true);
     }
 
+    //在MultiProducerSequencer的publish方法中，通过setAvailable来标示当前序号为已发布的状态
     @Override
     public void publish(long publishIndex) {
         setAvailable(publishIndex);
@@ -129,36 +137,81 @@ public class MultiProducerSequencer implements ProducerSequencer{
     //消费者会调用isAvailable来进行比对，如果一致，可以消费；如果不一致，不可以消费
     //还未完全搞清楚原理
     private void setAvailable(long publishIndex) {
+        int index = calculateIndex(publishIndex);
+        int flag = calculateAvailabilityFlag(publishIndex);
 
+        // 计算index对应下标相对于availableBuffer引用起始位置的指针偏移量
+        long bufferAddress = (index * scale) + base;
+
+        // 功能上等价于this.availableBuffer[index] = flag，但添加了写屏障
+        // 和单线程生产者中的lazySet作用一样，保证了对publish发布的event事件对象的更新一定先于对availableBuffer对应下标值的更新
+        // 避免消费者拿到新的发布序列号时由于新event事件未对其可见，而错误的消费了之前老的event事件
+        unsafe.putOrderedInt(availableBuffer, bufferAddress, flag);
+
+    }
+
+    private int calculateAvailabilityFlag(long publishIndex) {
+
+        return (int) (publishIndex >>> indexShift);
+    }
+
+    private int calculateIndex(long publishIndex) {
+
+        return ((int) publishIndex) & indexMask;
     }
 
     @Override
     public SequenceBarrier newBarrier() {
-        return null;
+        return new SequenceBarrier(this, this.currentProducerSequence, this.waitStrategy, new ArrayList<>());
     }
 
     @Override
     public SequenceBarrier newBarrier(Sequence... dependenceSequences) {
-        return null;
+        return new SequenceBarrier(this, this.currentProducerSequence, this.waitStrategy, new ArrayList<>(Arrays.asList(dependenceSequences)));
     }
 
     @Override
     public void addGatingConsumerSequenceList(Sequence... newGatingConsumerSequences) {
-
+        this.gatingConsumerSequenceList.addAll(Arrays.asList(newGatingConsumerSequences));
     }
 
     @Override
     public Sequence getCurrentConsumerSequence() {
-        return null;
+        return this.currentProducerSequence;
     }
 
     @Override
     public int getRingBufferSize() {
-        return 0;
+        return this.ringBufferSize;
     }
 
     @Override
-    public long getHighestPublishedSequenceNumber(long nextSequenceNumber, long availableSequenceNumber) {
-        return 0;
+    public long getHighestPublishedSequenceNumber(long lowBound, long availableSequenceNumber) {
+        // lowBound是消费者传入的，保证是已经明确发布了的最小生产者序列号
+        // 因此，从lowBound开始，向后寻找,有两种情况
+        // 1 在lowBound到availableSequence中间存在未发布的下标(isAvailable(sequence) == false)，
+        // 那么，找到的这个未发布下标的前一个序列号，就是当前最大的已经发布了的序列号（可以被消费者正常消费）
+        // 2 在lowBound到availableSequence中间不存在未发布的下标，那么就和单生产者的情况一样
+        // 包括availableSequence以及之前的序列号都已经发布过了，availableSequence就是当前可用的最大的的序列号（已发布的）
+        for(long sequence = lowBound; sequence <= availableSequenceNumber; sequence++){
+            if (!isAvailable(sequence)) {
+                // 属于上述的情况1，lowBound和availableSequence中间存在未发布的序列号
+                return sequence - 1;
+            }
+        }
+        return availableSequenceNumber;
+    }
+
+    //在消费者序列屏障中被调用的getHighestPublishedSequence方法中，则通过isAvailable来判断传入的序列号是否已发布
+    private boolean isAvailable(long sequence) {
+        int index = calculateIndex(sequence);
+        int flag = calculateAvailabilityFlag(sequence);
+
+        // 计算index对应下标相对于availableBuffer引用起始位置的指针偏移量
+        long bufferAddress = (index * scale) + base;
+
+        // 功能上等价于this.availableBuffer[index] == flag
+        // 但是添加了读屏障保证了强一致的读，可以让消费者实时的获取到生产者新的发布
+        return unsafe.getIntVolatile(availableBuffer, bufferAddress) == flag;
     }
 }
