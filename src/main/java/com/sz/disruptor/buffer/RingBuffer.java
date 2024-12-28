@@ -77,4 +77,7 @@ public class RingBuffer<T> {
     }
 
 
+    public Sequence getCurrentProducerSequencer() {
+        return producerSequencer.getCurrentProducerSequence();
+    }
 }

@@ -35,8 +35,6 @@ public class SingleProducerSequencer implements ProducerSequencer{
     }
 
 
-
-
     @Override
     public long next() {
         return next(1);
@@ -104,5 +102,10 @@ public class SingleProducerSequencer implements ProducerSequencer{
     @Override
     public long getHighestPublishedSequenceNumber(long nextSequenceNumber, long availableSequenceNumber) {
         return availableSequenceNumber;
+    }
+
+    @Override
+    public Sequence getCurrentProducerSequence() {
+        return this.currentProducerSequence;
     }
 }

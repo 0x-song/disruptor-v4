@@ -202,6 +202,11 @@ public class MultiProducerSequencer implements ProducerSequencer{
         return availableSequenceNumber;
     }
 
+    @Override
+    public Sequence getCurrentProducerSequence() {
+        return this.currentProducerSequence;
+    }
+
     //在消费者序列屏障中被调用的getHighestPublishedSequence方法中，则通过isAvailable来判断传入的序列号是否已发布
     private boolean isAvailable(long sequence) {
         int index = calculateIndex(sequence);

@@ -28,4 +28,5 @@ public interface ProducerSequencer {
 
     long getHighestPublishedSequenceNumber(long nextSequenceNumber, long availableSequenceNumber);
 
+    Sequence getCurrentProducerSequence();
 }
